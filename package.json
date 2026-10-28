@@ -44,12 +44,15 @@
     "@types/qrcode": "^1.5.5",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
-    "postcss": "^8.5.0",
+    "postcss": "^8.5.32",
     "prisma": "^6.16.0",
     "tailwindcss": "^4.1.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vite-tsconfig-paths": "^5.1.0",
     "vitest": "^3.2.0"
+  },
+  "overrides": {
+    "postcss": "$postcss"
   }
 }

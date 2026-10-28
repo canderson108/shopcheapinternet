@@ -130,7 +130,17 @@ jobs:
             echo "$R"
             echo "$R" | grep -q '"publicId":"SCI-'
             PID=$(echo "$R" | sed -E 's/.*"publicId":"([^"]+)".*/\1/')
-            curl -s -b $J "http://localhost:3100/enrollment/$PID" | grep -q "Reference $PID"
+            curl -s -b $J "http://localhost:3100/enrollment/$PID" > /tmp/status.html
+            grep -q "Messages with your specialist" /tmp/status.html
+            grep -q "$PID" /tmp/status.html
+            grep -q "Waiting for Agent" /tmp/status.html
+            # Customer can message from the status page; the API returns the thread.
+            curl -s "${H[@]}" -d '{"body":"Is installation free?"}' "http://localhost:3100/api/enrollments/$PID/messages" | grep -q '"ok":true'
+            curl -s -b $J "http://localhost:3100/api/enrollments/$PID/messages" | grep -q "Is installation free?"
+            # Live event stream opens for the customer.
+            curl -s -N --max-time 4 -b $J "http://localhost:3100/api/enrollments/$PID/events" | grep -q "event: ready" || true
+            # Staff setup: first admin via /api/setup is refused without SETUP_TOKEN.
+            [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: http://localhost:3100' -H 'Content-Type: application/json' -d '{"token":"x","name":"A","email":"a@b.co","password":"p"}' http://localhost:3100/api/setup)" = "403" ]
             # Without the customer cookie the enrollment is not visible.
             curl -s "http://localhost:3100/enrollment/$PID" | grep -q "Open your enrollment securely"
             [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100/api/enrollments/$PID)" = "401" ]
