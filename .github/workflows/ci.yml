@@ -13,6 +13,8 @@ concurrency:
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 30
     services:
       postgres:
@@ -175,6 +177,17 @@ jobs:
             tail -n 150 "$f" > /tmp/tail.txt
             emit "$(basename "$f" .log)" /tmp/tail.txt
           done
+
+      - name: Publish generated lockfile to ci/lockfile branch
+        if: success() && github.ref == 'refs/heads/main'
+        run: |
+          if git ls-files --error-unmatch package-lock.json >/dev/null 2>&1; then echo "package-lock.json already tracked"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b ci/lockfile
+          git add -f package-lock.json
+          git commit -m "Add CI-generated package-lock.json (tested in run ${{ github.run_id }})"
+          git push -f origin ci/lockfile
 
       - name: Upload lockfile
         if: always()
