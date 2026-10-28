@@ -1,0 +1,651 @@
+// Shop Cheap Internet — database schema
+// Customer PII columns ending in "Enc" are AES-256-GCM encrypted at the application layer (src/lib/crypto.ts).
+// Columns ending in "Hash" are keyed HMAC lookup hashes (never reversible).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum StaffRole {
+  AGENT
+  MANAGER
+  ADMIN
+}
+
+enum AgentAvailability {
+  AVAILABLE
+  BUSY
+  OFFLINE
+}
+
+enum EnrollmentStatus {
+  ENROLLMENT_STARTED
+  INFORMATION_SUBMITTED
+  WAITING_FOR_AGENT
+  AGENT_ASSIGNED
+  AGENT_PROCESSING
+  ADDITIONAL_INFO_REQUIRED
+  SUBMITTED_TO_PROVIDER
+  PROVIDER_ORDER_CONFIRMED
+  UNABLE_TO_COMPLETE
+  CUSTOMER_CANCELED
+}
+
+enum AvailabilityStatus {
+  INDICATIVE
+  ADVERTISED_IN_ZIP
+  AGENT_VERIFIED
+  NOT_AVAILABLE
+}
+
+enum ConnectionType {
+  FIBER
+  FIXED_WIRELESS
+  CABLE
+  DSL
+  SATELLITE
+  OTHER
+}
+
+enum ActorType {
+  SYSTEM
+  STAFF
+  CUSTOMER
+}
+
+enum MessageSender {
+  CUSTOMER
+  AGENT
+  SYSTEM
+}
+
+enum MessageKind {
+  TEXT
+  QUESTION
+  INFO_REQUEST
+  INSTALL_OPTIONS
+  PRICE_CHANGE
+  PROGRESS
+  RESPONSE
+}
+
+enum EmailStatus {
+  SENT
+  FAILED
+  SKIPPED
+}
+
+// ---------------------------------------------------------------------------
+// Staff (agents, managers, administrators)
+// ---------------------------------------------------------------------------
+
+model StaffUser {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  role         StaffRole @default(AGENT)
+  active       Boolean   @default(true)
+  mfaSecretEnc String?
+  mfaEnabled   Boolean   @default(false)
+  failedLogins Int       @default(0)
+  lockedUntil  DateTime?
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  agentProfile        AgentProfile?
+  sessions            StaffSession[]
+  assignedEnrollments Enrollment[]              @relation("AssignedAgent")
+  confirmedOrders     Enrollment[]              @relation("ConfirmedBy")
+  assignments         AgentAssignment[]         @relation("AssignmentAgent")
+  assignmentsMade     AgentAssignment[]         @relation("AssignmentBy")
+  notes               AgentNote[]
+  messages            Message[]
+  statusChanges       EnrollmentStatusHistory[]
+  auditLogs           AuditLog[]
+  priceChanges        PlanPriceHistory[]
+}
+
+model AgentProfile {
+  id                    String            @id @default(cuid())
+  staffUserId           String            @unique
+  availability          AgentAvailability @default(OFFLINE)
+  maxActiveOrders       Int               @default(5)
+  lastAssignedAt        DateTime?
+  availabilityChangedAt DateTime          @default(now())
+  totalAssigned         Int               @default(0)
+
+  staffUser StaffUser @relation(fields: [staffUserId], references: [id], onDelete: Cascade)
+
+  @@index([availability, lastAssignedAt])
+}
+
+model StaffSession {
+  id          String   @id @default(cuid())
+  tokenHash   String   @unique
+  staffUserId String
+  mfaVerified Boolean  @default(false)
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  ipHash      String?
+  userAgent   String?
+
+  staffUser StaffUser @relation(fields: [staffUserId], references: [id], onDelete: Cascade)
+
+  @@index([staffUserId])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Customers
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id        String    @id @default(cuid())
+  firstName String
+  lastName  String
+  emailEnc  String
+  emailHash String
+  phoneEnc  String
+  phoneHash String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  enrollments Enrollment[]
+  consents    ConsentRecord[]
+
+  @@index([emailHash])
+  @@index([phoneHash])
+  @@index([lastName, firstName])
+}
+
+model ConsentRecord {
+  id             String   @id @default(cuid())
+  customerId     String
+  enrollmentId   String?
+  consentType    String
+  consentVersion String
+  consentText    String
+  granted        Boolean
+  ipHash         String?
+  userAgent      String?
+  createdAt      DateTime @default(now())
+
+  customer   Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  enrollment Enrollment? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+
+  @@index([customerId])
+  @@index([enrollmentId])
+}
+
+// ---------------------------------------------------------------------------
+// Providers, plans, pricing
+// ---------------------------------------------------------------------------
+
+model Provider {
+  id                      String   @id @default(cuid())
+  slug                    String   @unique
+  name                    String
+  logoUrl                 String?
+  websiteUrl              String?
+  active                  Boolean  @default(true)
+  orderable               Boolean  @default(false)
+  portalName              String?
+  orderPortalUrl          String?
+  orderInstructions       String?
+  enrollmentRequirements  String?
+  confirmationWorkflow    String?
+  confirmationNumberLabel String   @default("Confirmation number")
+  disclosure              String?
+  sortOrder               Int      @default(0)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  plans        Plan[]
+  serviceAreas ServiceArea[]
+  enrollments  Enrollment[]
+  properties   Property[]
+}
+
+model Plan {
+  id                  String         @id @default(cuid())
+  providerId          String
+  slug                String
+  name                String
+  connectionType      ConnectionType
+  downloadMbps        Int
+  uploadMbps          Int
+  monthlyPriceCents   Int
+  regularPriceCents   Int?
+  priceTermMonths     Int?
+  priceConditions     String?
+  installationFeeCents Int?
+  installationNotes   String?
+  equipmentFeeCents   Int?
+  equipmentIncluded   String?
+  promoDescription    String?
+  promoExpiresAt      DateTime?
+  promoExpirationNote String?
+  contractRequired    Boolean        @default(false)
+  contractTerms       String?
+  dataCap             String?
+  disclosures         String?
+  featured            Boolean        @default(false)
+  active              Boolean        @default(true)
+  sortOrder           Int            @default(0)
+  sourceName          String
+  sourceUrl           String?
+  sourceCheckedAt     DateTime
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  provider     Provider           @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  priceHistory PlanPriceHistory[]
+  enrollments  Enrollment[]
+  sessions     EnrollmentSession[]
+
+  @@unique([providerId, slug])
+  @@index([active, featured])
+}
+
+model PlanPriceHistory {
+  id                String    @id @default(cuid())
+  planId            String
+  monthlyPriceCents Int
+  regularPriceCents Int?
+  promoDescription  String?
+  sourceName        String
+  sourceUrl         String?
+  sourceCheckedAt   DateTime
+  changedById       String?
+  note              String?
+  changedAt         DateTime  @default(now())
+
+  plan      Plan       @relation(fields: [planId], references: [id], onDelete: Cascade)
+  changedBy StaffUser? @relation(fields: [changedById], references: [id], onDelete: SetNull)
+
+  @@index([planId, changedAt])
+}
+
+// Advertised ZIP-level coverage. Indicative only — never proof of serviceability at an address.
+model ServiceArea {
+  id         String   @id @default(cuid())
+  providerId String
+  zip        String
+  note       String?
+  createdAt  DateTime @default(now())
+
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, zip])
+  @@index([zip])
+}
+
+// ---------------------------------------------------------------------------
+// Properties, referral sources, campaigns
+// ---------------------------------------------------------------------------
+
+model ReferralSource {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  type      String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  properties  Property[]
+  sessions    EnrollmentSession[]
+  enrollments Enrollment[]
+}
+
+model Campaign {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  name        String
+  utmSource   String?
+  utmMedium   String?
+  utmCampaign String?
+  startsAt    DateTime?
+  endsAt      DateTime?
+  active      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  properties  Property[]
+  sessions    EnrollmentSession[]
+  enrollments Enrollment[]
+}
+
+model Property {
+  id                String   @id @default(cuid())
+  slug              String   @unique
+  name              String
+  externalId        String?
+  street            String
+  city              String
+  state             String
+  zip               String
+  managementCompany String?
+  contactName       String?
+  contactEmail      String?
+  notes             String?
+  active            Boolean  @default(true)
+  defaultProviderId String?
+  referralSourceId  String?
+  campaignId        String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  defaultProvider Provider?           @relation(fields: [defaultProviderId], references: [id], onDelete: SetNull)
+  referralSource  ReferralSource?     @relation(fields: [referralSourceId], references: [id], onDelete: SetNull)
+  campaign        Campaign?           @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  units           PropertyUnit[]
+  sessions        EnrollmentSession[]
+  enrollments     Enrollment[]
+}
+
+model PropertyUnit {
+  id         String   @id @default(cuid())
+  propertyId String
+  unitNumber String
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([propertyId, unitNumber])
+}
+
+// ---------------------------------------------------------------------------
+// Enrollment funnel
+// ---------------------------------------------------------------------------
+
+// One per browser shopping session. A session with an address is a "lead".
+model EnrollmentSession {
+  id                 String    @id @default(cuid())
+  tokenHash          String    @unique
+  propertyId         String?
+  unitNumber         String?
+  referralSourceId   String?
+  campaignId         String?
+  utmSource          String?
+  utmMedium          String?
+  utmCampaign        String?
+  utmTerm            String?
+  utmContent         String?
+  gclid              String?
+  fbclid             String?
+  landingPath        String?
+  streetEnc          String?
+  unitEnc            String?
+  city               String?
+  state              String?
+  zip                String?
+  addressVerified    Boolean   @default(false)
+  addressSource      String?
+  addressEnteredAt   DateTime?
+  selectedPlanId     String?
+  selectedPriceCents Int?
+  selectedAt         DateTime?
+  draftEnc           String?
+  idempotencyKey     String?
+  enrollmentId       String?   @unique
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  expiresAt          DateTime
+
+  property       Property?       @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  referralSource ReferralSource? @relation(fields: [referralSourceId], references: [id], onDelete: SetNull)
+  campaign       Campaign?       @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  selectedPlan   Plan?           @relation(fields: [selectedPlanId], references: [id], onDelete: SetNull)
+  enrollment     Enrollment?     @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([propertyId])
+  @@index([zip])
+}
+
+model Enrollment {
+  id                   String             @id @default(cuid())
+  publicId             String             @unique
+  idempotencyKey       String             @unique
+  customerId           String
+  providerId           String
+  planId               String
+  status               EnrollmentStatus   @default(INFORMATION_SUBMITTED)
+  statusVersion        Int                @default(0)
+  serviceStreetEnc     String
+  serviceUnitEnc       String?
+  serviceCity          String
+  serviceState         String
+  serviceZip           String
+  addressVerified      Boolean            @default(false)
+  billingSameAsService Boolean            @default(true)
+  billingAddressEnc    String?
+  planSnapshot         Json
+  advertisedPriceCents Int
+  pricingSource        String
+  pricingCheckedAt     DateTime
+  availabilityStatus   AvailabilityStatus @default(INDICATIVE)
+  preferredInstallDate DateTime?          @db.Date
+  preferredInstallTime String?
+  customerNotesEnc     String?
+  propertyId           String?
+  unitNumber           String?
+  referralSourceId     String?
+  campaignId           String?
+  utmSource            String?
+  utmMedium            String?
+  utmCampaign          String?
+  gclid                String?
+  fbclid               String?
+  gaClientId           String?
+  assignedAgentId      String?
+  assignedAt           DateTime?
+  checklist            Json               @default("{}")
+  confirmationNumber   String?
+  confirmedPlanName    String?
+  confirmedPriceCents  Int?
+  confirmedInstallDate DateTime?          @db.Date
+  orderSubmittedAt     DateTime?
+  confirmationNotes    String?
+  confirmedById        String?
+  confirmedAt          DateTime?
+  completedAt          DateTime?
+  unreadForAgent       Int                @default(0)
+  unreadForCustomer    Int                @default(0)
+  lastCustomerMessageAt DateTime?
+  submittedAt          DateTime           @default(now())
+  piiDeletedAt         DateTime?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  customer       Customer                  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  provider       Provider                  @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  plan           Plan                      @relation(fields: [planId], references: [id], onDelete: Restrict)
+  property       Property?                 @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  referralSource ReferralSource?           @relation(fields: [referralSourceId], references: [id], onDelete: SetNull)
+  campaign       Campaign?                 @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  assignedAgent  StaffUser?                @relation("AssignedAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  confirmedBy    StaffUser?                @relation("ConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
+  session        EnrollmentSession?
+  statusHistory  EnrollmentStatusHistory[]
+  assignments    AgentAssignment[]
+  messages       Message[]
+  notes          AgentNote[]
+  consents       ConsentRecord[]
+  accessTokens   CustomerAccessToken[]
+  customerSessions CustomerSession[]
+  auditLogs      AuditLog[]
+  emailLogs      EmailLog[]
+
+  @@index([status, submittedAt])
+  @@index([assignedAgentId, status])
+  @@index([propertyId])
+  @@index([providerId])
+  @@index([planId])
+  @@index([createdAt])
+  @@index([customerId])
+}
+
+model EnrollmentStatusHistory {
+  id           String            @id @default(cuid())
+  enrollmentId String
+  fromStatus   EnrollmentStatus?
+  toStatus     EnrollmentStatus
+  actorType    ActorType
+  actorStaffId String?
+  note         String?
+  createdAt    DateTime          @default(now())
+
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  actorStaff StaffUser? @relation(fields: [actorStaffId], references: [id], onDelete: SetNull)
+
+  @@index([enrollmentId, createdAt])
+}
+
+model AgentAssignment {
+  id           String    @id @default(cuid())
+  enrollmentId String
+  agentId      String
+  assignedById String?
+  reason       String
+  active       Boolean   @default(true)
+  assignedAt   DateTime  @default(now())
+  unassignedAt DateTime?
+
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  agent      StaffUser  @relation("AssignmentAgent", fields: [agentId], references: [id], onDelete: Cascade)
+  assignedBy StaffUser? @relation("AssignmentBy", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@index([enrollmentId])
+  @@index([agentId, active])
+}
+
+model Message {
+  id            String        @id @default(cuid())
+  enrollmentId  String
+  senderType    MessageSender
+  staffAuthorId String?
+  kind          MessageKind   @default(TEXT)
+  bodyEnc       String
+  payload       Json?
+  responseToId  String?
+  createdAt     DateTime      @default(now())
+
+  enrollment  Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  staffAuthor StaffUser? @relation(fields: [staffAuthorId], references: [id], onDelete: SetNull)
+
+  @@index([enrollmentId, createdAt])
+}
+
+model AgentNote {
+  id           String   @id @default(cuid())
+  enrollmentId String
+  authorId     String
+  bodyEnc      String
+  createdAt    DateTime @default(now())
+
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  author     StaffUser  @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([enrollmentId, createdAt])
+}
+
+// Expiring re-entry links emailed to customers.
+model CustomerAccessToken {
+  id           String    @id @default(cuid())
+  enrollmentId String
+  tokenHash    String    @unique
+  expiresAt    DateTime
+  lastUsedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+
+  @@index([enrollmentId])
+}
+
+// Browser session granting a customer access to one enrollment's status page.
+model CustomerSession {
+  id           String   @id @default(cuid())
+  enrollmentId String
+  tokenHash    String   @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+
+  @@index([enrollmentId])
+}
+
+// ---------------------------------------------------------------------------
+// Infrastructure
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id           String    @id @default(cuid())
+  actorType    ActorType
+  actorStaffId String?
+  action       String
+  entityType   String
+  entityId     String?
+  enrollmentId String?
+  metadata     Json?
+  ipHash       String?
+  createdAt    DateTime  @default(now())
+
+  actorStaff StaffUser?  @relation(fields: [actorStaffId], references: [id], onDelete: SetNull)
+  enrollment Enrollment? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([actorStaffId, createdAt])
+  @@index([enrollmentId, createdAt])
+  @@index([entityType, entityId])
+}
+
+// Durable event log that backs the server-sent-event streams.
+model RealtimeEvent {
+  id        BigInt   @id @default(autoincrement())
+  channel   String
+  type      String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  @@index([channel, id])
+  @@index([createdAt])
+}
+
+model RateLimitBucket {
+  key       String   @id
+  count     Int
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+model EmailLog {
+  id                String      @id @default(cuid())
+  enrollmentId      String?
+  template          String
+  toHash            String
+  subject           String
+  provider          String
+  status            EmailStatus
+  providerMessageId String?
+  error             String?
+  createdAt         DateTime    @default(now())
+
+  enrollment Enrollment? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+
+  @@index([enrollmentId])
+  @@index([createdAt])
+}

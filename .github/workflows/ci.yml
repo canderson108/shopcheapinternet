@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sci
+          POSTGRES_PASSWORD: sci
+          POSTGRES_DB: sci_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sci" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://sci:sci@localhost:5432/sci_test
+      DIRECT_URL: postgresql://sci:sci@localhost:5432/sci_test
+      SHADOW_DATABASE_URL: postgresql://sci:sci@localhost:5432/sci_shadow
+      APP_URL: http://localhost:3000
+      DATA_ENCRYPTION_KEY: ${{ secrets.CI_DATA_ENCRYPTION_KEY || 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=' }}
+      HASH_PEPPER: ci-only-pepper
+      EMAIL_PROVIDER: memory
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          mkdir -p /tmp/ci-logs
+          if [ -f package-lock.json ]; then npm ci 2>&1 | tee /tmp/ci-logs/install.log; else npm install 2>&1 | tee /tmp/ci-logs/install.log; fi
+          exit ${PIPESTATUS[0]}
+
+      - name: Validate Prisma schema
+        run: npx prisma validate 2>&1 | tee /tmp/ci-logs/validate.log; exit ${PIPESTATUS[0]}
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy 2>&1 | tee /tmp/ci-logs/migrate.log; exit ${PIPESTATUS[0]}
+
+      - name: Check migrations match schema (no drift)
+        run: |
+          PGPASSWORD=sci psql -h localhost -U sci -d sci_test -c "CREATE DATABASE sci_shadow" >/dev/null
+          set +e
+          npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma \
+            --shadow-database-url "$SHADOW_DATABASE_URL" --script > /tmp/ci-logs/drift.sql 2>&1
+          npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma \
+            --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code > /dev/null 2>&1
+          code=$?
+          if [ "$code" = "2" ]; then
+            echo "Migrations do not match schema.prisma. Missing SQL:"; cat /tmp/ci-logs/drift.sql
+            cp /tmp/ci-logs/drift.sql /tmp/ci-logs/drift.log
+            exit 1
+          fi
+          if [ "$code" != "0" ]; then cat /tmp/ci-logs/drift.sql; cp /tmp/ci-logs/drift.sql /tmp/ci-logs/drift.log; exit 1; fi
+          echo "No drift."
+
+      - name: Seed reference data (idempotent, run twice)
+        run: |
+          (npx tsx prisma/seed.ts && npx tsx prisma/seed.ts) 2>&1 | tee /tmp/ci-logs/seed.log; exit ${PIPESTATUS[0]}
+
+      - name: Run tests
+        run: npx vitest run --reporter=verbose 2>&1 | tee /tmp/ci-logs/test.log; exit ${PIPESTATUS[0]}
+
+      - name: Reset database and seed for build + smoke test
+        run: (npx prisma migrate reset --force --skip-generate) 2>&1 | tee /tmp/ci-logs/reset.log; exit ${PIPESTATUS[0]}
+
+      - name: Production build
+        env:
+          NODE_ENV: production
+        run: npm run build 2>&1 | tee /tmp/ci-logs/build.log; exit ${PIPESTATUS[0]}
+
+      - name: Type check
+        run: npx tsc --noEmit --pretty false 2>&1 | tee /tmp/ci-logs/typecheck.log; exit ${PIPESTATUS[0]}
+
+      - name: Smoke test production server
+        env:
+          NODE_ENV: production
+          STAFF_MFA_REQUIRED: "true"
+        run: |
+          (npm start -- -p 3100 > /tmp/ci-logs/server-out.log 2>&1 &)
+          for i in $(seq 1 40); do curl -sf http://localhost:3100/ > /dev/null && break; sleep 1; done
+          set -e
+          {
+            set -x
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100/)" = "200" ]
+            curl -s http://localhost:3100/ | grep -q "Find Cheap Internet Plans at Your Address"
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100/providers/att)" = "200" ]
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100/sitemap.xml)" = "200" ]
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100/staff/login)" = "200" ]
+            # Protected areas redirect to sign-in; APIs reject unauthenticated access.
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100/agent)" = "307" ]
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100/admin)" = "307" ]
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100/api/agent/queue)" = "401" ]
+            # Cross-site POSTs are blocked.
+            [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Origin: https://evil.example' -H 'Content-Type: application/json' -d '{}' http://localhost:3100/api/enrollments)" = "403" ]
+            # Funnel: address -> plans -> plan select -> submit, using a cookie jar like a browser.
+            J=/tmp/jar.txt
+            H=(-H 'Origin: http://localhost:3100' -H 'Content-Type: application/json' -b $J -c $J)
+            curl -s "${H[@]}" -d '{"address":{"street":"123 Main St","unit":"4B","city":"Dallas","state":"TX","zip":"75201"}}' http://localhost:3100/api/session/address | grep -q '"ok":true'
+            curl -s -b $J http://localhost:3100/plans | grep -q "Fiber 300"
+            PLAN=$(PGPASSWORD=sci psql -h localhost -U sci -d sci_test -tAc "select id from \"Plan\" where slug='fiber-300'")
+            curl -s "${H[@]}" -d "{\"planId\":\"$PLAN\"}" http://localhost:3100/api/session/plan | grep -q '"next":"/enroll"'
+            curl -s -b $J http://localhost:3100/enroll | grep -q "Complete Enrollment Request"
+            R=$(curl -s "${H[@]}" -d '{"firstName":"Smoke","lastName":"Test","email":"smoke@example.com","phone":"2145550142","billingSameAsService":true,"consentTerms":true,"consentContact":true,"idempotencyKey":"smoketestkey00000001"}' http://localhost:3100/api/enrollments)
+            echo "$R"
+            echo "$R" | grep -q '"publicId":"SCI-'
+            PID=$(echo "$R" | sed -E 's/.*"publicId":"([^"]+)".*/\1/')
+            curl -s -b $J "http://localhost:3100/enrollment/$PID" | grep -q "Reference $PID"
+            # Without the customer cookie the enrollment is not visible.
+            curl -s "http://localhost:3100/enrollment/$PID" | grep -q "Open your enrollment securely"
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3100/api/enrollments/$PID)" = "401" ]
+          } 2>&1 | tee /tmp/ci-logs/smoke.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Report failure details
+        if: failure()
+        run: |
+          for f in /tmp/ci-logs/*.log; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f" .log)
+            body=$(grep -v '^\s*$' "$f" | tail -n 120 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g' | cut -c1-60000)
+            echo "::error title=${name}::${body}"
+          done
+
+      - name: Upload lockfile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-lock
+          path: package-lock.json
+          if-no-files-found: ignore
