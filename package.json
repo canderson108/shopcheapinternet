@@ -53,6 +53,8 @@
     "vitest": "^3.2.0"
   },
   "overrides": {
-    "postcss": "$postcss"
+    "next": {
+      "postcss": "^8.5.32"
+    }
   }
 }

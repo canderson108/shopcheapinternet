@@ -170,7 +170,7 @@ jobs:
             grep -nE "×|FAIL|→|Error|expected|received|Test Files|Tests  " /tmp/ci-logs/test.log | grep -v "prisma:error" | head -150 > /tmp/test-fail.txt || true
             [ -s /tmp/test-fail.txt ] && emit test-failures /tmp/test-fail.txt
           fi
-          for f in /tmp/ci-logs/smoke.log /tmp/ci-logs/server-out.log /tmp/ci-logs/typecheck.log /tmp/ci-logs/drift.log /tmp/ci-logs/reset.log; do
+          for f in /tmp/ci-logs/install.log /tmp/ci-logs/smoke.log /tmp/ci-logs/server-out.log /tmp/ci-logs/typecheck.log /tmp/ci-logs/drift.log /tmp/ci-logs/reset.log; do
             [ -f "$f" ] || continue
             tail -n 150 "$f" > /tmp/tail.txt
             emit "$(basename "$f" .log)" /tmp/tail.txt
