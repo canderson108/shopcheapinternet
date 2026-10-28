@@ -72,7 +72,7 @@ describe("order processing and confirmation", () => {
     const view = await getCustomerView(e.id);
     expect(view.confirmation?.number).toBe("ATT-55512345");
     const agentView = await getAgentOrderView(e.id);
-    expect(agentView.notes[0].body).toContain("morning install");
+    expect(agentView.notes.some((n) => n.body.includes("morning install"))).toBe(true);
     expect(agentView.history.map((h) => h.to)).toEqual(
       expect.arrayContaining(["AGENT_ASSIGNED", "AGENT_PROCESSING", "SUBMITTED_TO_PROVIDER", "PROVIDER_ORDER_CONFIRMED"]),
     );

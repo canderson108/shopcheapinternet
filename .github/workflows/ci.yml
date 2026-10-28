@@ -33,6 +33,8 @@ jobs:
       HASH_PEPPER: ci-only-pepper
       EMAIL_PROVIDER: memory
       NEXT_TELEMETRY_DISABLED: "1"
+      NO_COLOR: "1"
+      FORCE_COLOR: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +47,12 @@ jobs:
           mkdir -p /tmp/ci-logs
           if [ -f package-lock.json ]; then npm ci 2>&1 | tee /tmp/ci-logs/install.log; else npm install 2>&1 | tee /tmp/ci-logs/install.log; fi
           exit ${PIPESTATUS[0]}
+
+      - name: Dependency audit (production dependencies)
+        run: |
+          npm audit --omit=dev > /tmp/ci-logs/audit.txt 2>&1 || true
+          body=$(grep -E "^[a-z@]|Severity|fix available|vulnerabilit" /tmp/ci-logs/audit.txt | head -60 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')
+          echo "::warning title=npm-audit::${body}"
 
       - name: Validate Prisma schema
         run: npx prisma validate 2>&1 | tee /tmp/ci-logs/validate.log; exit ${PIPESTATUS[0]}
@@ -130,11 +138,25 @@ jobs:
       - name: Report failure details
         if: failure()
         run: |
-          for f in /tmp/ci-logs/*.log; do
+          emit() { # title, file — split into chunks small enough for annotations
+            local title="$1" file="$2" i=0
+            sed -e 's/\x1b\[[0-9;]*m//g' "$file" | grep -v '^\s*$' > /tmp/clean.txt
+            split -b 3000 /tmp/clean.txt /tmp/chunk_
+            for c in /tmp/chunk_*; do
+              i=$((i+1)); [ $i -gt 8 ] && break
+              body=$(sed -e 's/%/%25/g' "$c" | sed -e ':a;N;$!ba;s/\n/%0A/g')
+              echo "::error title=${title} (${i})::${body}"
+            done
+            rm -f /tmp/chunk_*
+          }
+          if [ -f /tmp/ci-logs/test.log ]; then
+            grep -nE "×|FAIL|→|Error|expected|received|Test Files|Tests  " /tmp/ci-logs/test.log | grep -v "prisma:error" | head -150 > /tmp/test-fail.txt || true
+            [ -s /tmp/test-fail.txt ] && emit test-failures /tmp/test-fail.txt
+          fi
+          for f in /tmp/ci-logs/build.log /tmp/ci-logs/typecheck.log /tmp/ci-logs/smoke.log /tmp/ci-logs/drift.log /tmp/ci-logs/reset.log /tmp/ci-logs/server-out.log; do
             [ -f "$f" ] || continue
-            name=$(basename "$f" .log)
-            body=$(grep -v '^\s*$' "$f" | tail -n 120 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g' | cut -c1-60000)
-            echo "::error title=${name}::${body}"
+            tail -n 150 "$f" > /tmp/tail.txt
+            emit "$(basename "$f" .log)" /tmp/tail.txt
           done
 
       - name: Upload lockfile
