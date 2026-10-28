@@ -51,7 +51,9 @@ jobs:
       - name: Dependency audit (production dependencies)
         run: |
           npm audit --omit=dev > /tmp/ci-logs/audit.txt 2>&1 || true
-          body=$(grep -E "^[a-z@]|Severity|fix available|vulnerabilit" /tmp/ci-logs/audit.txt | head -60 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')
+          npm ls deepmerge-ts postcss zod nodemailer --all >> /tmp/ci-logs/audit.txt 2>&1 || true
+          echo "latest: postcss=$(npm view postcss version) deepmerge-ts=$(npm view deepmerge-ts version) next15=$(npm view next@15 version | tail -1) next=$(npm view next version)" >> /tmp/ci-logs/audit.txt
+          body=$(grep -E "^[a-z@]|Severity|fix available|vulnerabilit|─|latest:" /tmp/ci-logs/audit.txt | head -80 | sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g')
           echo "::warning title=npm-audit::${body}"
 
       - name: Validate Prisma schema
@@ -140,7 +142,8 @@ jobs:
         run: |
           emit() { # title, file — split into chunks small enough for annotations
             local title="$1" file="$2" i=0
-            sed -e 's/\x1b\[[0-9;]*m//g' "$file" | grep -v '^\s*$' > /tmp/clean.txt
+            sed -e 's/\x1b\[[0-9;]*m//g' "$file" | grep -v '^\s*$' > /tmp/clean.txt || true
+            [ -s /tmp/clean.txt ] || return 0
             split -b 3000 /tmp/clean.txt /tmp/chunk_
             for c in /tmp/chunk_*; do
               i=$((i+1)); [ $i -gt 8 ] && break
@@ -149,11 +152,15 @@ jobs:
             done
             rm -f /tmp/chunk_*
           }
+          if [ -f /tmp/ci-logs/build.log ] && grep -qiE "error|failed" /tmp/ci-logs/build.log && [ ! -f /tmp/ci-logs/typecheck.log ]; then
+            grep -iE -B2 -A8 "error|failed" /tmp/ci-logs/build.log | head -120 > /tmp/build-err.txt || true
+            emit build-errors /tmp/build-err.txt
+          fi
           if [ -f /tmp/ci-logs/test.log ]; then
             grep -nE "×|FAIL|→|Error|expected|received|Test Files|Tests  " /tmp/ci-logs/test.log | grep -v "prisma:error" | head -150 > /tmp/test-fail.txt || true
             [ -s /tmp/test-fail.txt ] && emit test-failures /tmp/test-fail.txt
           fi
-          for f in /tmp/ci-logs/build.log /tmp/ci-logs/typecheck.log /tmp/ci-logs/smoke.log /tmp/ci-logs/drift.log /tmp/ci-logs/reset.log /tmp/ci-logs/server-out.log; do
+          for f in /tmp/ci-logs/smoke.log /tmp/ci-logs/server-out.log /tmp/ci-logs/typecheck.log /tmp/ci-logs/drift.log /tmp/ci-logs/reset.log; do
             [ -f "$f" ] || continue
             tail -n 150 "$f" > /tmp/tail.txt
             emit "$(basename "$f" .log)" /tmp/tail.txt

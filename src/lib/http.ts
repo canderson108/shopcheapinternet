@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { ZodError, type ZodTypeAny, type z } from "zod";
+import { ZodError, type z } from "zod";
 import { AppError } from "./errors";
 import { lookupHash } from "./crypto";
 import { zodFieldErrors } from "./validation";
@@ -34,7 +34,7 @@ export function route<P = Record<string, string>>(fn: (req: NextRequest, ctx: Ro
   };
 }
 
-export async function readBody<S extends ZodTypeAny>(req: Request, schema: S): Promise<z.output<S>> {
+export async function readBody<S extends z.ZodType>(req: Request, schema: S): Promise<z.output<S>> {
   let raw: unknown;
   try {
     raw = await req.json();

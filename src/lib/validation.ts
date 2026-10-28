@@ -48,15 +48,15 @@ export const enrollmentSubmitSchema = z
     preferredInstallDate: installDateSchema,
     preferredInstallTime: z.enum(["morning", "afternoon", "evening", "any"]).optional().nullable(),
     notes: z.string().max(1000).optional().nullable().transform((s) => (s ? s.trim() : null)),
-    consentTerms: z.literal(true, { errorMap: () => ({ message: "You must accept to continue" }) }),
-    consentContact: z.literal(true, { errorMap: () => ({ message: "We need permission to contact you about this order" }) }),
+    consentTerms: z.literal(true, { error: "You must accept to continue" }),
+    consentContact: z.literal(true, { error: "We need permission to contact you about this order" }),
     consentMarketing: z.boolean().optional().default(false),
     idempotencyKey: z.string().min(16).max(64).regex(/^[A-Za-z0-9_-]+$/),
     gaClientId: z.string().max(64).optional().nullable(),
   })
   .superRefine((v, ctx) => {
     if (!v.billingSameAsService && !v.billing) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["billing"], message: "Enter your billing address" });
+      ctx.addIssue({ code: "custom", path: ["billing"], message: "Enter your billing address" });
     }
   });
 
@@ -110,7 +110,7 @@ function luhn(num: string): boolean {
 export function zodFieldErrors(err: z.ZodError): Record<string, string> {
   const out: Record<string, string> = {};
   for (const issue of err.issues) {
-    const key = issue.path.join(".") || "_";
+    const key = issue.path.map(String).join(".") || "_";
     if (!out[key]) out[key] = issue.message;
   }
   return out;

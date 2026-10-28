@@ -25,7 +25,7 @@ export const POST = route(async (req) => {
   const body = await readBody(req, bodySchema);
   const parsed = addressSchema.safeParse(body.address);
   if (!parsed.success) {
-    throw new AppError("Please check your address.", 422, "validation", Object.fromEntries(parsed.error.issues.map((i) => [i.path.join("."), i.message])));
+    throw new AppError("Please check your address.", 422, "validation", Object.fromEntries(parsed.error.issues.map((i) => [i.path.map(String).join("."), i.message])));
   }
   let address = parsed.data;
 

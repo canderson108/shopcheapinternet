@@ -32,7 +32,7 @@ const str = (fd: FormData, k: string) => {
 const bool = (fd: FormData, k: string) => fd.get(k) === "on" || fd.get(k) === "true";
 
 function errMessage(e: unknown): string {
-  if (e instanceof ZodError) return e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+  if (e instanceof ZodError) return e.issues.map((i) => `${i.path.map(String).join(".")}: ${i.message}`).join("; ");
   if (e instanceof AppError) return e.message;
   if (e && typeof e === "object" && "code" in e && (e as { code: string }).code === "P2002") return "That value is already in use (must be unique).";
   console.error("[admin action]", e);
